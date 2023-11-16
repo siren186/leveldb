@@ -8,6 +8,7 @@
 #define NOMINMAX
 #endif  // ifndef NOMINMAX
 #include <windows.h>
+#include <atlstr.h>
 
 #include <algorithm>
 #include <atomic>
@@ -47,17 +48,17 @@ int g_mmap_limit = kDefaultMmapLimit;
 
 std::string GetWindowsErrorMessage(DWORD error_code) {
   std::string message;
-  char* error_text = nullptr;
+  wchar_t* error_text = nullptr;
   // Use MBCS version of FormatMessage to match return value.
-  size_t error_text_size = ::FormatMessageA(
+  size_t error_text_size = ::FormatMessageW(
       FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER |
           FORMAT_MESSAGE_IGNORE_INSERTS,
       nullptr, error_code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-      reinterpret_cast<char*>(&error_text), 0, nullptr);
+      reinterpret_cast<wchar_t*>(&error_text), 0, nullptr);
   if (!error_text) {
     return message;
   }
-  message.assign(error_text, error_text_size);
+  message = (const char*)CW2A(error_text, CP_UTF8);
   ::LocalFree(error_text);
   return message;
 }
@@ -392,11 +393,13 @@ class WindowsEnv : public Env {
 
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
+    std::wstring filename_wide =
+        (const wchar_t*)CA2W(filename.c_str(), CP_UTF8);
     *result = nullptr;
     DWORD desired_access = GENERIC_READ;
     DWORD share_mode = FILE_SHARE_READ;
-    ScopedHandle handle = ::CreateFileA(
-        filename.c_str(), desired_access, share_mode,
+    ScopedHandle handle = ::CreateFileW(
+        filename_wide.c_str(), desired_access, share_mode,
         /*lpSecurityAttributes=*/nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
         /*hTemplateFile=*/nullptr);
     if (!handle.is_valid()) {
@@ -409,11 +412,13 @@ class WindowsEnv : public Env {
 
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
+    std::wstring filename_wide =
+        (const wchar_t*)CA2W(filename.c_str(), CP_UTF8);
     *result = nullptr;
     DWORD desired_access = GENERIC_READ;
     DWORD share_mode = FILE_SHARE_READ;
     ScopedHandle handle =
-        ::CreateFileA(filename.c_str(), desired_access, share_mode,
+        ::CreateFileW(filename_wide.c_str(), desired_access, share_mode,
                       /*lpSecurityAttributes=*/nullptr, OPEN_EXISTING,
                       FILE_ATTRIBUTE_READONLY,
                       /*hTemplateFile=*/nullptr);
@@ -433,7 +438,7 @@ class WindowsEnv : public Env {
     }
 
     ScopedHandle mapping =
-        ::CreateFileMappingA(handle.get(),
+        ::CreateFileMappingW(handle.get(),
                              /*security attributes=*/nullptr, PAGE_READONLY,
                              /*dwMaximumSizeHigh=*/0,
                              /*dwMaximumSizeLow=*/0,
@@ -456,10 +461,12 @@ class WindowsEnv : public Env {
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
+    std::wstring filename_wide =
+        (const wchar_t*)CA2W(filename.c_str(), CP_UTF8);
     DWORD desired_access = GENERIC_WRITE;
     DWORD share_mode = 0;  // Exclusive access.
-    ScopedHandle handle = ::CreateFileA(
-        filename.c_str(), desired_access, share_mode,
+    ScopedHandle handle = ::CreateFileW(
+        filename_wide.c_str(), desired_access, share_mode,
         /*lpSecurityAttributes=*/nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
         /*hTemplateFile=*/nullptr);
     if (!handle.is_valid()) {
@@ -473,10 +480,12 @@ class WindowsEnv : public Env {
 
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
+    std::wstring filename_wide =
+        (const wchar_t*)CA2W(filename.c_str(), CP_UTF8);
     DWORD desired_access = FILE_APPEND_DATA;
     DWORD share_mode = 0;  // Exclusive access.
-    ScopedHandle handle = ::CreateFileA(
-        filename.c_str(), desired_access, share_mode,
+    ScopedHandle handle = ::CreateFileW(
+        filename_wide.c_str(), desired_access, share_mode,
         /*lpSecurityAttributes=*/nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
         /*hTemplateFile=*/nullptr);
     if (!handle.is_valid()) {
@@ -489,14 +498,18 @@ class WindowsEnv : public Env {
   }
 
   bool FileExists(const std::string& filename) override {
-    return GetFileAttributesA(filename.c_str()) != INVALID_FILE_ATTRIBUTES;
+    std::wstring filename_wide =
+        (const wchar_t*)CA2W(filename.c_str(), CP_UTF8);
+    return GetFileAttributesW(filename_wide.c_str()) != INVALID_FILE_ATTRIBUTES;
   }
 
   Status GetChildren(const std::string& directory_path,
                      std::vector<std::string>* result) override {
-    const std::string find_pattern = directory_path + "\\*";
-    WIN32_FIND_DATAA find_data;
-    HANDLE dir_handle = ::FindFirstFileA(find_pattern.c_str(), &find_data);
+    std::wstring directory_path_wide =
+        (const wchar_t*)CA2W(directory_path.c_str(), CP_UTF8);
+    const std::wstring find_pattern = directory_path_wide + L"\\*";
+    WIN32_FIND_DATAW find_data;
+    HANDLE dir_handle = ::FindFirstFileW(find_pattern.c_str(), &find_data);
     if (dir_handle == INVALID_HANDLE_VALUE) {
       DWORD last_error = ::GetLastError();
       if (last_error == ERROR_FILE_NOT_FOUND) {
@@ -505,14 +518,16 @@ class WindowsEnv : public Env {
       return WindowsError(directory_path, last_error);
     }
     do {
-      char base_name[_MAX_FNAME];
-      char ext[_MAX_EXT];
+      wchar_t base_name[_MAX_FNAME];
+      wchar_t ext[_MAX_EXT];
 
-      if (!_splitpath_s(find_data.cFileName, nullptr, 0, nullptr, 0, base_name,
+      if (!_wsplitpath_s(find_data.cFileName, nullptr, 0, nullptr, 0, base_name,
                         ARRAYSIZE(base_name), ext, ARRAYSIZE(ext))) {
-        result->emplace_back(std::string(base_name) + ext);
+        std::string base_name_utf8 = (const char*)CW2A(base_name, CP_UTF8);
+        std::string ext_utf8 = (const char*)CW2A(ext, CP_UTF8);
+        result->emplace_back(base_name_utf8 + ext_utf8);
       }
-    } while (::FindNextFileA(dir_handle, &find_data));
+    } while (::FindNextFileW(dir_handle, &find_data));
     DWORD last_error = ::GetLastError();
     ::FindClose(dir_handle);
     if (last_error != ERROR_NO_MORE_FILES) {
@@ -522,29 +537,35 @@ class WindowsEnv : public Env {
   }
 
   Status RemoveFile(const std::string& filename) override {
-    if (!::DeleteFileA(filename.c_str())) {
+    std::wstring filename_wide =
+        (const wchar_t*)CA2W(filename.c_str(), CP_UTF8);
+    if (!::DeleteFileW(filename_wide.c_str())) {
       return WindowsError(filename, ::GetLastError());
     }
     return Status::OK();
   }
 
   Status CreateDir(const std::string& dirname) override {
-    if (!::CreateDirectoryA(dirname.c_str(), nullptr)) {
+    std::wstring dirname_wide = (const wchar_t*)CA2W(dirname.c_str(), CP_UTF8);
+    if (!::CreateDirectoryW(dirname_wide.c_str(), nullptr)) {
       return WindowsError(dirname, ::GetLastError());
     }
     return Status::OK();
   }
 
   Status RemoveDir(const std::string& dirname) override {
-    if (!::RemoveDirectoryA(dirname.c_str())) {
+    std::wstring dirname_wide = (const wchar_t*)CA2W(dirname.c_str(), CP_UTF8);
+    if (!::RemoveDirectoryW(dirname_wide.c_str())) {
       return WindowsError(dirname, ::GetLastError());
     }
     return Status::OK();
   }
 
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
+    std::wstring filename_wide =
+        (const wchar_t*)CA2W(filename.c_str(), CP_UTF8);
     WIN32_FILE_ATTRIBUTE_DATA file_attributes;
-    if (!::GetFileAttributesExA(filename.c_str(), GetFileExInfoStandard,
+    if (!::GetFileAttributesExW(filename_wide.c_str(), GetFileExInfoStandard,
                                 &file_attributes)) {
       return WindowsError(filename, ::GetLastError());
     }
@@ -558,7 +579,9 @@ class WindowsEnv : public Env {
   Status RenameFile(const std::string& from, const std::string& to) override {
     // Try a simple move first. It will only succeed when |to| doesn't already
     // exist.
-    if (::MoveFileA(from.c_str(), to.c_str())) {
+    std::wstring from_wide = (const wchar_t*)CA2W(from.c_str(), CP_UTF8);
+    std::wstring to_wide = (const wchar_t*)CA2W(to.c_str(), CP_UTF8);
+    if (::MoveFileW(from_wide.c_str(), to_wide.c_str())) {
       return Status::OK();
     }
     DWORD move_error = ::GetLastError();
@@ -567,7 +590,8 @@ class WindowsEnv : public Env {
     // succeed when |to| does exist. When writing to a network share, we may not
     // be able to change the ACLs. Ignore ACL errors then
     // (REPLACEFILE_IGNORE_MERGE_ERRORS).
-    if (::ReplaceFileA(to.c_str(), from.c_str(), /*lpBackupFileName=*/nullptr,
+    if (::ReplaceFileW(to_wide.c_str(), from_wide.c_str(),
+                       /*lpBackupFileName=*/nullptr,
                        REPLACEFILE_IGNORE_MERGE_ERRORS,
                        /*lpExclude=*/nullptr, /*lpReserved=*/nullptr)) {
       return Status::OK();
@@ -585,10 +609,12 @@ class WindowsEnv : public Env {
   }
 
   Status LockFile(const std::string& filename, FileLock** lock) override {
+    std::wstring filename_wide =
+        (const wchar_t*)CA2W(filename.c_str(), CP_UTF8);
     *lock = nullptr;
     Status result;
-    ScopedHandle handle = ::CreateFileA(
-        filename.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+    ScopedHandle handle = ::CreateFileW(
+        filename_wide.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
         /*lpSecurityAttributes=*/nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
         nullptr);
     if (!handle.is_valid()) {
@@ -628,13 +654,13 @@ class WindowsEnv : public Env {
       return Status::OK();
     }
 
-    char tmp_path[MAX_PATH];
-    if (!GetTempPathA(ARRAYSIZE(tmp_path), tmp_path)) {
+    wchar_t tmp_path[MAX_PATH];
+    if (!GetTempPathW(ARRAYSIZE(tmp_path), tmp_path)) {
       return WindowsError("GetTempPath", ::GetLastError());
     }
-    std::stringstream ss;
-    ss << tmp_path << "leveldbtest-" << std::this_thread::get_id();
-    *result = ss.str();
+    std::wstringstream ss;
+    ss << tmp_path << L"leveldbtest-" << std::this_thread::get_id();
+    *result = (const char*)CW2A(ss.str().c_str(), CP_UTF8);
 
     // Directory may already exist
     CreateDir(*result);
@@ -642,7 +668,9 @@ class WindowsEnv : public Env {
   }
 
   Status NewLogger(const std::string& filename, Logger** result) override {
-    std::FILE* fp = std::fopen(filename.c_str(), "wN");
+    std::wstring filename_wide =
+        (const wchar_t*)CA2W(filename.c_str(), CP_UTF8);
+    std::FILE* fp = _wfopen(filename_wide.c_str(), L"wN");
     if (fp == nullptr) {
       *result = nullptr;
       return WindowsError(filename, ::GetLastError());
